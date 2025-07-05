@@ -1,0 +1,479 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mdscript name="FactionAmbassador" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="md.xsd">
+    <cues>
+        <!-- Main root cue -->
+        <cue name="FactionAmbassador_Root" namespace="this">
+            <conditions>
+                <check_any>
+                    <event_cue_signalled cue="md.Setup.Start" />
+                    <event_game_loaded />
+                </check_any>
+            </conditions>
+            <delay exact="10s" />
+            <actions>
+                <debug_text text="'[FactionAmbassador] Initializing'" />
+                
+                <!-- Initialize variables -->
+                <set_value name="$State" exact="'idle'" />
+                <set_value name="$VisitDuration" exact="120s" />
+                <set_value name="$DockedTime" exact="0" />
+                <set_value name="$DepartingStartTime" exact="0" />
+                
+                <!-- Create groups for event handling -->
+                <create_group groupname="$ShipGroup" />
+                <create_group groupname="$NPCGroup" />
+                
+                <!-- Ensure global player container group exists -->
+                <do_if value="not global.$PlayerContainerGroup?">
+                    <create_group groupname="global.$PlayerContainerGroup" />
+                    <add_to_group groupname="global.$PlayerContainerGroup" object="player.ship" />
+                    <add_to_group groupname="global.$PlayerContainerGroup" object="player.entity" />
+                </do_if>
+                
+                <!-- Build HQ list -->
+                <set_value name="$HQList" exact="[]" />
+                <do_all exact="[faction.argon, faction.teladi, faction.paranid].count" counter="$i">
+                    <set_value name="$faction" exact="[faction.argon, faction.teladi, faction.paranid].{$i}" />
+                    <do_if value="$faction.headquarters.exists">
+                        <append_to_list name="$HQList" exact="$faction.headquarters" />
+                        <debug_text text="'[FactionAmbassador] Added HQ: %s'.[$faction.headquarters.knownname]" />
+                    </do_if>
+                </do_all>
+                
+                <do_if value="$HQList.count == 0">
+                    <debug_text text="'[FactionAmbassador] No HQs found - cancelling'" filter="error" />
+                    <cancel_cue cue="FactionAmbassador_Root" />
+                </do_if>
+                
+                <debug_text text="'[FactionAmbassador] Found %s HQs'.[$HQList.count]" />
+                <set_value name="$CurrentHQIndex" exact="1" />
+                
+                <!-- Create components -->
+                <signal_cue_instantly cue="CreateComponents" />
+            </actions>
+            
+            <cues>
+                <!-- Component creation -->
+                <cue name="CreateComponents" instantiate="true">
+                    <conditions>
+                        <event_cue_signalled />
+                    </conditions>
+                    <actions>
+                        <debug_text text="'[FactionAmbassador] Creating components'" />
+                        
+                        <!-- Clean up existing -->
+                        <do_if value="@$AmbassadorShip.exists">
+                            <debug_text text="'[FactionAmbassador] Destroying existing ship'" />
+                            <destroy_object object="$AmbassadorShip" />
+                        </do_if>
+                        <do_if value="@$AmbassadorNPC.exists">
+                            <debug_text text="'[FactionAmbassador] Destroying existing NPC'" />
+                            <destroy_object object="$AmbassadorNPC" />
+                        </do_if>
+                        
+                        <!-- Clear groups -->
+                        <clear_group group="$ShipGroup" />
+                        <clear_group group="$NPCGroup" />
+                        
+                        <!-- Create ship -->
+                        <create_ship name="$AmbassadorShip" macro="ship_arg_m_frigate_01_b_macro" sector="player.sector">
+                            <owner exact="faction.player" />
+                            <pilot>
+                                <select race="race.argon" tags="tag.elitepilot" />
+                            </pilot>
+                            <safepos object="player.sector" max="5km" />
+                        </create_ship>
+                        <set_object_name object="$AmbassadorShip" name="'FRG Diplomatic Envoy'" />
+                        <add_to_group groupname="$ShipGroup" object="$AmbassadorShip" />
+                        <debug_text text="'[FactionAmbassador] Created ship: %s in %s'.[$AmbassadorShip, player.sector.knownname]" />
+                        
+                        <!-- Create NPC -->
+                        <create_cue_actor name="$AmbassadorNPC" cue="FactionAmbassador_Root">
+                            <select race="race.argon" />
+                            <owner exact="faction.argon" />
+                            <name name="'Ambassador Dorian'" />
+                        </create_cue_actor>
+                        <add_actor_to_room actor="$AmbassadorNPC" object="$AmbassadorShip.controlroom" />
+                        <set_entity_traits entity="$AmbassadorNPC" missionactor="true" />
+                        <add_to_group groupname="$NPCGroup" object="$AmbassadorNPC" />
+                        <debug_text text="'[FactionAmbassador] Created NPC: %s'.[$AmbassadorNPC.knownname]" />
+                        
+                        <!-- Start mission -->
+                        <set_value name="$State" exact="'idle'" />
+                        <debug_text text="'[FactionAmbassador] Components created successfully'" />
+                        
+                        <!-- Now that components exist, start the main mission logic -->
+                        <signal_cue_instantly cue="Main" />
+                    </actions>
+                </cue>
+                
+                <!-- Main mission cue containing all event listeners -->
+                <cue name="Main">
+                    <conditions>
+                        <event_cue_signalled />
+                    </conditions>
+                    <actions>
+                        <debug_text text="'[FactionAmbassador] Main mission logic started'" />
+                    </actions>
+                    
+                    <cues>
+                        <!-- Main mission controller - checks every 30s -->
+                        <cue name="MissionController" instantiate="true" checkinterval="30s">
+                            <conditions>
+                                <check_value value="$AmbassadorShip.exists and $AmbassadorNPC.exists" />
+                            </conditions>
+                            <actions>
+                                <debug_text text="'[FactionAmbassador] Mission loop - State: %s'.[$State]" />
+                                
+                                <do_if value="$State == 'idle'">
+                                    <!-- Start next journey -->
+                                    <set_value name="$TargetHQ" exact="$HQList.{$CurrentHQIndex}" />
+                                    
+                                    <!-- Validate HQ still exists before traveling -->
+                                    <do_if value="$TargetHQ.exists">
+                                        <create_order object="$AmbassadorShip" id="'DockAt'">
+                                            <param name="destination" value="$TargetHQ" />
+                                        </create_order>
+                                        
+                                        <set_value name="$State" exact="'traveling'" />
+                                        <debug_text text="'[FactionAmbassador] Traveling to %s (HQ %s/%s)'.[$TargetHQ.knownname, $CurrentHQIndex, $HQList.count]" />
+                                        
+                                        <!-- Increment index for next visit -->
+                                        <set_value name="$CurrentHQIndex" exact="$CurrentHQIndex + 1" />
+                                        <do_if value="$CurrentHQIndex gt $HQList.count">
+                                            <set_value name="$CurrentHQIndex" exact="1" />
+                                        </do_if>
+                                    </do_if>
+                                    <do_else>
+                                        <debug_text text="'[FactionAmbassador] HQ no longer exists - removing from list'" filter="error" />
+                                        <remove_from_list name="$HQList" exact="$TargetHQ" />
+                                        <!-- Adjust index if needed -->
+                                        <do_if value="$CurrentHQIndex gt $HQList.count and $HQList.count gt 0">
+                                            <set_value name="$CurrentHQIndex" exact="1" />
+                                        </do_if>
+                                        <!-- Check if any HQs left -->
+                                        <do_if value="$HQList.count == 0">
+                                            <debug_text text="'[FactionAmbassador] No HQs remaining - mission ending'" filter="error" />
+                                            <destroy_object object="$AmbassadorShip" />
+                                            <destroy_object object="$AmbassadorNPC" />
+                                            <cancel_cue cue="FactionAmbassador_Root" />
+                                        </do_if>
+                                    </do_else>
+                                </do_if>
+                                
+                                <do_elseif value="$State == 'traveling' and $AmbassadorShip.station">
+                                    <!-- Arrived at station -->
+                                    <set_value name="$State" exact="'visiting'" />
+                                    <set_value name="$DockedTime" exact="player.age" />
+                                    <set_value name="$DockedStation" exact="$AmbassadorShip.station" />
+                                    <debug_text text="'[FactionAmbassador] Arrived at %s, starting visit'.[$DockedStation.knownname]" />
+                                    
+                                    <!-- Position ambassador at station -->
+                                    <signal_cue_instantly cue="PositionAmbassador" param="$DockedStation" />
+                                </do_elseif>
+                                
+                                <do_elseif value="$State == 'visiting' and (player.age - $DockedTime) gt $VisitDuration">
+                                    <!-- Visit complete -->
+                                    <set_value name="$State" exact="'departing'" />
+                                    <set_value name="$DepartingStartTime" exact="player.age" />
+                                    <debug_text text="'[FactionAmbassador] Visit complete, departing'" />
+                                    <signal_cue_instantly cue="ReturnAmbassadorToShip" />
+                                </do_elseif>
+                                
+                                <do_elseif value="$State == 'departing'">
+                                    <!-- Waiting for ambassador to return to ship and undock -->
+                                    <set_value name="$departingTime" exact="player.age - $DepartingStartTime" />
+                                    <debug_text text="'[FactionAmbassador] In departing state - time elapsed: %ss'.[$departingTime]" />
+                                    
+                                    <!-- Timeout after 90 seconds -->
+                                    <do_if value="$departingTime gt 90s">
+                                        <debug_text text="'[FactionAmbassador] Departing timeout - forcing completion'" filter="error" />
+                                        <!-- Force ambassador to ship -->
+                                        <remove_actor_from_room actor="$AmbassadorNPC" />
+                                        <add_actor_to_room actor="$AmbassadorNPC" object="$AmbassadorShip.controlroom" />
+                                        <!-- Undock if still docked -->
+                                        <do_if value="$AmbassadorShip.station">
+                                            <create_order object="$AmbassadorShip" id="'Undock'" />
+                                        </do_if>
+                                        <!-- Reset to idle -->
+                                        <set_value name="$State" exact="'idle'" />
+                                    </do_if>
+                                </do_elseif>
+                                
+                                <do_elseif value="$State == 'traveling'">
+                                    <debug_text text="'[FactionAmbassador] Still traveling to %s'.[@$TargetHQ.knownname]" />
+                                </do_elseif>
+                                
+                                <do_elseif value="$State == 'visiting'">
+                                    <debug_text text="'[FactionAmbassador] Still visiting, %ss remaining'.[$VisitDuration - (player.age - $DockedTime)]" />
+                                </do_elseif>
+                            </actions>
+                        </cue>
+                        
+                        <!-- Handle destroyed components -->
+                        <cue name="ComponentDestroyed" instantiate="true">
+                            <conditions>
+                                <check_any>
+                                    <event_object_destroyed group="$ShipGroup" />
+                                    <event_object_destroyed group="$NPCGroup" />
+                                </check_any>
+                            </conditions>
+                            <delay exact="60s" comment="Wait before recreating" />
+                            <actions>
+                                <debug_text text="'[FactionAmbassador] Component destroyed - restarting'" filter="error" />
+                                <!-- Cancel Main cue to stop all event listeners -->
+                                <cancel_cue cue="Main" />
+                                <!-- Recreate components -->
+                                <signal_cue_instantly cue="CreateComponents" />
+                            </actions>
+                        </cue>
+                        
+                        <!-- SIMPLIFIED: Position ambassador at station -->
+                        <cue name="PositionAmbassador" instantiate="true">
+                            <conditions>
+                                <event_cue_signalled />
+                            </conditions>
+                            <actions>
+                                <!-- Handle both single param and array param formats -->
+                                <do_if value="typeof event.param == datatype.list">
+                                    <set_value name="$station" exact="event.param.{1}" />
+                                    <set_value name="$shouldAnimate" exact="@event.param.{2}" />
+                                </do_if>
+                                <do_else>
+                                    <set_value name="$station" exact="event.param" />
+                                    <set_value name="$shouldAnimate" exact="(player.station and player.station == $station) or player.ship == $AmbassadorShip" />
+                                </do_else>
+                                
+                                <debug_text text="'[FactionAmbassador] Positioning ambassador at %s (animate: %s)'.[$station.knownname, $shouldAnimate]" />
+                                
+                                <!-- Find faction rep slot first, then fallback to service slot -->
+                                <find_npc_slot name="$targetSlot" object="$station" tags="tag.factionrep" excludefilled="false" excludeblocked="false" />
+                                
+                                <do_if value="not $targetSlot">
+                                    <find_npc_slot name="$targetSlot" object="$station" tags="tag.service" />
+                                    <debug_text text="'[FactionAmbassador] No faction rep slot found, using service slot'" />
+                                </do_if>
+                                
+                                <do_if value="$targetSlot">
+                                    <!-- SIMPLIFIED: Just use the slot with offset -->
+                                    <do_if value="$shouldAnimate">
+                                        <debug_text text="'[FactionAmbassador] Animating movement to slot %s with offset'.[$targetSlot]" />
+                                        <signal_objects object="$AmbassadorNPC" param="'npc_move_to'" param2="table[
+                                            $slot = $targetSlot,
+                                            $offset = position.[1m, 0m, 0m],
+                                            $movementspeed = $AmbassadorNPC.walkspeed
+                                        ]" />
+                                        <show_help custom="'Ambassador Dorian is visiting ' + $station.knownname" duration="5s" />
+                                    </do_if>
+                                    <do_else>
+                                        <!-- Direct placement with teleport for offset -->
+                                        <debug_text text="'[FactionAmbassador] Direct placement at slot %s with offset'.[$targetSlot]" />
+                                        <remove_actor_from_room actor="$AmbassadorNPC" />
+                                        <add_actor_to_room actor="$AmbassadorNPC" object="$targetSlot.room" />
+                                        <signal_objects object="$AmbassadorNPC" param="'npc_move_to'" param2="table[
+                                            $slot = $targetSlot,
+                                            $offset = position.[1m, 0m, 0m],
+                                            $teleport = true
+                                        ]" />
+                                    </do_else>
+                                </do_if>
+                                <do_else>
+                                    <!-- No slots found - just place in control room -->
+                                    <debug_text text="'[FactionAmbassador] No suitable slots found, placing in control room'" />
+                                    <remove_actor_from_room actor="$AmbassadorNPC" />
+                                    <add_actor_to_room actor="$AmbassadorNPC" object="$station.controlroom" />
+                                </do_else>
+                                
+                                <set_entity_traits entity="$AmbassadorNPC" hidden="false" />
+                            </actions>
+                        </cue>
+                        
+                        <!-- SIMPLIFIED: Return ambassador to ship -->
+                        <cue name="ReturnAmbassadorToShip" instantiate="true">
+                            <conditions>
+                                <event_cue_signalled />
+                            </conditions>
+                            <actions>
+                                <debug_text text="'[FactionAmbassador] Returning ambassador to ship'" />
+                                
+                                <do_if value="$AmbassadorShip.station">
+                                    <set_value name="$shouldAnimate" exact="(player.station and player.station == $AmbassadorShip.station) or player.ship == $AmbassadorShip" />
+                                    
+                                    <!-- Find pilot slot on ship for positioning reference -->
+                                    <find_npc_slot name="$pilotSlot" object="$AmbassadorShip" post="controlpost.aipilot" excludefilled="false" excludeblocked="false" />
+                                    
+                                    <do_if value="$shouldAnimate">
+                                        <do_if value="$pilotSlot">
+                                            <!-- SIMPLIFIED: Move to offset from pilot -->
+                                            <debug_text text="'[FactionAmbassador] Animating walk to pilot offset'" />
+                                            <signal_objects object="$AmbassadorNPC" param="'npc_move_to'" param2="table[
+                                                $slot = $pilotSlot,
+                                                $offset = position.[0m, 0m, 1m],
+                                                $movementspeed = $AmbassadorNPC.walkspeed
+                                            ]" />
+                                            <show_help custom="'Ambassador Dorian is returning to the ship'" duration="4s" />
+                                        </do_if>
+                                        <do_else>
+                                            <!-- No pilot slot - find any slot in control room -->
+                                            <find_npc_slot name="$slot" object="$AmbassadorShip.controlroom" />
+                                            <do_if value="$slot">
+                                                <signal_objects object="$AmbassadorNPC" param="'npc_move_to'" param2="table[
+                                                    $slot = $slot,
+                                                    $movementspeed = $AmbassadorNPC.walkspeed
+                                                ]" />
+                                            </do_if>
+                                            <do_else>
+                                                <!-- Direct placement -->
+                                                <remove_actor_from_room actor="$AmbassadorNPC" />
+                                                <add_actor_to_room actor="$AmbassadorNPC" object="$AmbassadorShip.controlroom" />
+                                            </do_else>
+                                        </do_else>
+                                    </do_if>
+                                    <do_else>
+                                        <!-- No animation - direct placement -->
+                                        <debug_text text="'[FactionAmbassador] Direct return to ship'" />
+                                        <remove_actor_from_room actor="$AmbassadorNPC" />
+                                        <add_actor_to_room actor="$AmbassadorNPC" object="$AmbassadorShip.controlroom" />
+                                        
+                                        <!-- If pilot slot exists, teleport to offset position -->
+                                        <do_if value="$pilotSlot">
+                                            <signal_objects object="$AmbassadorNPC" param="'npc_move_to'" param2="table[
+                                                $slot = $pilotSlot,
+                                                $offset = position.[0m, 0m, 1m],
+                                                $teleport = true
+                                            ]" />
+                                        </do_if>
+                                        
+                                        <!-- Ready to undock -->
+                                        <signal_cue_instantly cue="UndockShip" />
+                                    </do_else>
+                                </do_if>
+                                <do_else>
+                                    <!-- Ship already undocked -->
+                                    <debug_text text="'[FactionAmbassador] Ship already undocked'" />
+                                    <set_value name="$State" exact="'idle'" />
+                                </do_else>
+                            </actions>
+                        </cue>
+                        
+                        <!-- Undock ship -->
+                        <cue name="UndockShip" instantiate="true">
+                            <conditions>
+                                <event_cue_signalled />
+                            </conditions>
+                            <actions>
+                                <debug_text text="'[FactionAmbassador] Undocking ship'" />
+                                <do_if value="$AmbassadorShip.station">
+                                    <create_order object="$AmbassadorShip" id="'Undock'" />
+                                </do_if>
+                                <set_value name="$State" exact="'idle'" />
+                            </actions>
+                        </cue>
+                        
+                        <!-- Handle NPC movement completion -->
+                        <cue name="NPCMoveComplete" instantiate="true">
+                            <conditions>
+                                <event_object_signalled group="$NPCGroup" param="'npc_move_completed'" />
+                            </conditions>
+                            <actions>
+                                <debug_text text="'[FactionAmbassador] NPC movement completed'" />
+                                <do_if value="$State == 'departing'">
+                                    <signal_cue_instantly cue="UndockShip" />
+                                </do_if>
+                            </actions>
+                        </cue>
+                        
+                        <!-- Movement timeout handler -->
+                        <cue name="MovementTimeout" instantiate="true">
+                            <conditions>
+                                <event_object_signalled group="$NPCGroup" param="'npc_move_to'" />
+                            </conditions>
+                            <delay exact="30s" />
+                            <actions>
+                                <debug_text text="'[FactionAmbassador] Movement timeout'" />
+                                <do_if value="$State == 'departing'">
+                                    <!-- Force completion -->
+                                    <remove_actor_from_room actor="$AmbassadorNPC" />
+                                    <add_actor_to_room actor="$AmbassadorNPC" object="$AmbassadorShip.controlroom" />
+                                    <signal_cue_instantly cue="UndockShip" />
+                                </do_if>
+                            </actions>
+                        </cue>
+                        
+                        <!-- Handle player presence changes -->
+                        <cue name="PlayerPresenceChanged" instantiate="true">
+                            <conditions>
+                                <check_any>
+                                    <event_object_docked group="global.$PlayerContainerGroup" />
+                                    <event_object_undocked group="global.$PlayerContainerGroup" />
+                                    <event_player_teleport_successful />
+                                </check_any>
+                            </conditions>
+                            <actions>
+                                <debug_text text="'[FactionAmbassador] Player presence changed - State: %s, Event: %s'.[$State, event.name]" />
+                                
+                                <do_if value="$State == 'visiting' or $State == 'departing'">
+                                    <!-- Check if player just docked at the station where ambassador is -->
+                                    <do_if value="event.name == 'event_object_docked' and $AmbassadorShip.station and event.param == $AmbassadorShip.station and $AmbassadorNPC.container == $AmbassadorShip.station">
+                                        <debug_text text="'[FactionAmbassador] Player ship docked at ambassador station'" />
+                                        <!-- Reposition ambassador to faction rep room -->
+                                        <signal_cue_instantly cue="PositionAmbassador" param="[$AmbassadorShip.station, true]" />
+                                    </do_if>
+                                    <!-- Check if player just left the station where ambassador is -->
+                                    <do_elseif value="event.name == 'event_object_undocked' and $AmbassadorShip.station and event.param == $AmbassadorShip.station">
+                                        <debug_text text="'[FactionAmbassador] Player undocked from station where ambassador is visiting'" />
+                                        <!-- Could move ambassador to control room here if desired -->
+                                    </do_elseif>
+                                    <!-- Check if player teleported away from station -->
+                                    <do_elseif value="event.name == 'event_player_teleport_successful' and $AmbassadorShip.station and player.station != $AmbassadorShip.station">
+                                        <debug_text text="'[FactionAmbassador] Player teleported away from ambassador station'" />
+                                        <do_if value="$State == 'departing'">
+                                            <!-- Ambassador was walking back to ship - complete the journey -->
+                                            <debug_text text="'[FactionAmbassador] Completing ambassador return to ship (player teleported away)'" />
+                                            <remove_actor_from_room actor="$AmbassadorNPC" />
+                                            <add_actor_to_room actor="$AmbassadorNPC" object="$AmbassadorShip.controlroom" />
+                                            <signal_cue_instantly cue="UndockShip" />
+                                        </do_if>
+                                    </do_elseif>
+                                    <!-- Check if player teleported to ambassador's visit location -->
+                                    <do_elseif value="$AmbassadorShip.station and player.station == $AmbassadorShip.station">
+                                        <debug_text text="'[FactionAmbassador] Player teleported to ambassador station'" />
+                                        <signal_cue_instantly cue="PositionAmbassador" param="$AmbassadorShip.station" />
+                                    </do_elseif>
+                                </do_if>
+                                <do_else>
+                                    <!-- Not visiting/departing - check if player boarded ambassador ship -->
+                                    <do_if value="player.ship == $AmbassadorShip and $AmbassadorNPC.exists">
+                                        <debug_text text="'[FactionAmbassador] Player on ambassador ship - positioning ambassador'" />
+                                        
+                                        <!-- First ensure ambassador is on the ship -->
+                                        <do_if value="$AmbassadorNPC.container != $AmbassadorShip">
+                                            <remove_actor_from_room actor="$AmbassadorNPC" />
+                                            <add_actor_to_room actor="$AmbassadorNPC" object="$AmbassadorShip.controlroom" />
+                                        </do_if>
+                                        
+                                        <!-- Find pilot slot for offset positioning -->
+                                        <find_npc_slot name="$pilotSlot" object="$AmbassadorShip" post="controlpost.aipilot" excludefilled="false" excludeblocked="false" />
+                                        
+                                        <do_if value="$pilotSlot">
+                                            <debug_text text="'[FactionAmbassador] Found pilot slot, positioning ambassador with offset'" />
+                                            <!-- SIMPLIFIED: Just use slot with offset -->
+                                            <signal_objects object="$AmbassadorNPC" param="'npc_move_to'" param2="table[
+                                                $slot = $pilotSlot,
+                                                $offset = position.[0m, 0m, 1m],
+                                                $teleport = true
+                                            ]" />
+                                        </do_if>
+                                        <do_else>
+                                            <debug_text text="'[FactionAmbassador] No pilot slot found, ambassador stays in control room'" />
+                                        </do_else>
+                                    </do_if>
+                                </do_else>
+                            </actions>
+                        </cue>
+                    </cues>
+                </cue>
+            </cues>
+        </cue>
+    </cues>
+</mdscript>
