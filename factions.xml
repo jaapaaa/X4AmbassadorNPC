@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<diff>
-    <add sel="//factions">
-        <faction id="oma1" name="Oma 1" description="Oma 1" shortname="OMA" prefixname="Oma" behaviourset="default">
-        </faction>
-    </add>
-</diff>
